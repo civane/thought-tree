@@ -8,7 +8,10 @@ from pathlib import Path
 from datetime import datetime
 
 SESSIONS_DIR = Path.home() / ".claude" / "projects" / "-Users-civane"
-TREE_DATA    = Path.home() / "Desktop" / "thought-tree" / "public" / "tree_data.json"
+PUBLIC_DIR   = Path.home() / "Desktop" / "thought-tree" / "public"
+SESSIONS_OUT = PUBLIC_DIR / "sessions"
+CURRENT_FILE = PUBLIC_DIR / "current.json"
+INDEX_FILE   = PUBLIC_DIR / "sessions_index.json"
 STATE_FILE   = Path.home() / ".claude" / "scripts" / ".tree_sync_state.json"
 
 _SKIP_PHRASES = [
@@ -132,9 +135,10 @@ def parse_last_exchange(path: Path):
     return None
 
 
-def load_tree() -> dict:
-    if TREE_DATA.exists():
-        return json.loads(TREE_DATA.read_text(encoding="utf-8"))
+def load_tree(session_id: str) -> dict:
+    tree_file = SESSIONS_OUT / f"{session_id}.json"
+    if tree_file.exists():
+        return json.loads(tree_file.read_text(encoding="utf-8"))
     return {
         "nodes": {"root": {"id": "root", "content": "Claude Code 对话", "parentId": None, "messages": []}},
         "rootId": "root",
@@ -181,7 +185,7 @@ def main():
         save_state(state)
         return
 
-    tree = load_tree()
+    tree = load_tree(session_id)
     for node in tree["nodes"].values():
         for msg in node.get("messages", []):
             if msg.get("role") == "user" and msg.get("text", "").startswith(user_text[:50]):
@@ -205,13 +209,7 @@ def main():
         cur = tree["nodes"].get(cur.get("parentId", ""))
     recent.reverse()
 
-    active_node_file = TREE_DATA.parent / "active_node.json"
     parent_id = tree["lastNodeId"]
-    if active_node_file.exists():
-        try:
-            parent_id = json.loads(active_node_file.read_text()).get("nodeId") or parent_id
-        except Exception:
-            pass
 
     # Topic shift detected → create a new parallel parent under root
     ts = int(datetime.now().timestamp() * 1000)
@@ -239,8 +237,44 @@ def main():
     tree["lastNodeId"] = node_id
     tree["version"]    = int(datetime.now().timestamp() * 1000)
 
-    TREE_DATA.parent.mkdir(parents=True, exist_ok=True)
-    TREE_DATA.write_text(json.dumps(tree, ensure_ascii=False, indent=2), encoding="utf-8")
+    # Save session tree
+    SESSIONS_OUT.mkdir(parents=True, exist_ok=True)
+    session_file = SESSIONS_OUT / f"{session_id}.json"
+    session_file.write_text(json.dumps(tree, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # Update current.json
+    CURRENT_FILE.write_text(json.dumps({
+        "sessionId": session_id,
+        "version": tree["version"],
+    }, ensure_ascii=False), encoding="utf-8")
+
+    # Update sessions index
+    index = []
+    if INDEX_FILE.exists():
+        index = json.loads(INDEX_FILE.read_text(encoding="utf-8"))
+
+    # Find or add this session in index
+    found = False
+    for entry in index:
+        if entry["id"] == session_id:
+            entry["updatedAt"] = tree["version"]
+            found = True
+            break
+
+    if not found:
+        # Get first user message as title
+        title = first_sentence(user_text, 20) if tree["nodes"]["root"].get("messages") else "New Session"
+        index.append({
+            "id": session_id,
+            "title": title,
+            "startedAt": tree["version"],
+            "updatedAt": tree["version"],
+        })
+
+    # Sort by updatedAt descending
+    index.sort(key=lambda x: x["updatedAt"], reverse=True)
+    INDEX_FILE.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+
     state[session_id] = mtime
     save_state(state)
     print(f"Added: {label}")

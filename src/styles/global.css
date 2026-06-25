@@ -1,0 +1,42 @@
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  font-family: 'Georgia', 'Times New Roman', 'Noto Serif SC', serif;
+  background: #f0ebe0;
+  color: #2a2720;
+}
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #c8bfaa; border-radius: 2px; }
+
+textarea:focus {
+  border-color: #5c7a62 !important;
+  box-shadow: 0 0 0 2px rgba(92,122,98,0.12);
+}
+
+/* Override ReactFlow default styles */
+.react-flow__controls {
+  box-shadow: none !important;
+  border: 1px solid #d4cdc0 !important;
+  border-radius: 12px !important;
+  overflow: hidden;
+}
+.react-flow__controls-button {
+  background: #faf8f3 !important;
+  border-bottom: 1px solid #e8e2d8 !important;
+  color: #6a5e50 !important;
+}
+.react-flow__controls-button:hover {
+  background: #f0ebe0 !important;
+}
+.react-flow__controls-button svg {
+  fill: #6a5e50 !important;
+}

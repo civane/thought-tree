@@ -57,26 +57,37 @@ def extract_tokens(text: str) -> set:
     return {p for p in parts if len(p) >= 2}
 
 
-def topic_changed(recent_summaries: list, new_text: str) -> bool:
-    """True if new_text has very low token overlap with recent branch content."""
+def topic_changed(recent_summaries: list, new_text: str, cfg: dict) -> bool:
+    """Use Haiku to semantically judge if new_text starts a new topic."""
     if not recent_summaries:
         return False
-    ctx = extract_tokens(' '.join(recent_summaries[-4:]))
-    new = extract_tokens(new_text[:400])
-    if not ctx or not new:
-        return False
-    jaccard = len(ctx & new) / len(ctx | new)
-    return jaccard < 0.08
-
-
-def summarize_via_api(user_text: str, assistant_text: str, cfg: dict) -> str:
+    context = "、".join(recent_summaries[-3:])
     prompt = (
-        f"用一句话（15字以内）概括这段问答的核心观点，只输出那句话：\n\n"
-        f"问：{user_text[:300]}\n\n答：{assistant_text[:400]}"
+        "判断新问答是否切换了话题，输出严格 JSON（不要 markdown 代码块）：\n"
+        '{"new_topic": true或false, "topic_label": "新话题标题（如果是新话题）"}\n\n'
+        f"当前话题上下文：{context[:300]}\n\n"
+        f"新问答：{new_text[:300]}"
     )
+    try:
+        raw = call_api(prompt, cfg, max_tokens=80)
+        raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+        data = json.loads(raw)
+        return bool(data.get("new_topic", False)), str(data.get("topic_label", ""))
+    except Exception as e:
+        print(f"Topic detection failed ({e}), fallback to Jaccard", file=sys.stderr)
+        # fallback to original Jaccard
+        ctx = extract_tokens(' '.join(recent_summaries[-4:]))
+        new = extract_tokens(new_text[:400])
+        if not ctx or not new:
+            return False, ""
+        jaccard = len(ctx & new) / len(ctx | new)
+        return jaccard < 0.08, first_sentence(new_text, 16)
+
+
+def call_api(prompt: str, cfg: dict, max_tokens: int = 200) -> str:
     payload = json.dumps({
         "model": "claude-haiku-4-5-20251001",
-        "max_tokens": 60,
+        "max_tokens": max_tokens,
         "messages": [{"role": "user", "content": prompt}],
     }).encode()
     req = urllib.request.Request(
@@ -93,12 +104,29 @@ def summarize_via_api(user_text: str, assistant_text: str, cfg: dict) -> str:
         return json.loads(r.read())["content"][0]["text"].strip()
 
 
-def summarize(user_text: str, assistant_text: str, cfg: dict) -> str:
+def summarize_via_api(user_text: str, assistant_text: str, cfg: dict) -> dict:
+    prompt = (
+        "分析这段问答，输出严格 JSON（不要 markdown 代码块）：\n"
+        '{"label":"15字内的树节点标题","summary":"50字内的核心结论，供知识库使用","tags":["标签1","标签2"]}\n\n'
+        f"问：{user_text[:300]}\n\n答：{assistant_text[:600]}"
+    )
+    raw = call_api(prompt, cfg, max_tokens=200)
+    raw = raw.strip().lstrip("```json").lstrip("```").rstrip("```").strip()
+    data = json.loads(raw)
+    return {
+        "label":   str(data.get("label", ""))[:20],
+        "summary": str(data.get("summary", ""))[:200],
+        "tags":    [str(t) for t in data.get("tags", [])][:5],
+    }
+
+
+def summarize(user_text: str, assistant_text: str, cfg: dict) -> dict:
     try:
         return summarize_via_api(user_text, assistant_text, cfg)
     except Exception as e:
-        print(f"API summary failed ({e}), using first sentence", file=sys.stderr)
-        return first_sentence(assistant_text)
+        print(f"API summary failed ({e}), using fallback", file=sys.stderr)
+        label = first_sentence(assistant_text)
+        return {"label": label, "summary": label, "tags": []}
 
 
 def parse_last_exchange(path: Path):
@@ -195,7 +223,7 @@ def main():
                 return
 
     cfg = get_api_config()
-    label = summarize(user_text, assistant_text, cfg)
+    meta = summarize(user_text, assistant_text, cfg)
 
     # Collect recent branch summaries for topic detection
     recent: list = []
@@ -203,7 +231,7 @@ def main():
     for _ in range(5):
         if not cur or cur["id"] == "root":
             break
-        recent.append(cur["content"] + " ".join(
+        recent.append(cur.get("summary", cur["content"]) + " ".join(
             m.get("text", "")[:80] for m in cur.get("messages", [])
         ))
         cur = tree["nodes"].get(cur.get("parentId", ""))
@@ -213,21 +241,28 @@ def main():
 
     # Topic shift detected → create a new parallel parent under root
     ts = int(datetime.now().timestamp() * 1000)
-    if recent and topic_changed(recent, user_text + " " + assistant_text):
-        topic_id = f"topic_{ts}"
-        tree["nodes"][topic_id] = {
-            "id":       topic_id,
-            "content":  "话题：" + first_sentence(user_text, 16),
-            "parentId": "root",
-            "messages": [],
-        }
-        parent_id = topic_id
-        print(f"Topic shift → new branch: {tree['nodes'][topic_id]['content']}")
+    if recent:
+        is_new_topic, topic_label = topic_changed(recent, user_text + " " + assistant_text, cfg)
+        if is_new_topic:
+            topic_id = f"topic_{ts}"
+            label = topic_label or first_sentence(user_text, 16)
+            tree["nodes"][topic_id] = {
+                "id":       topic_id,
+                "content":  "话题：" + label,
+                "summary":  label,
+                "tags":     [],
+                "parentId": "root",
+                "messages": [],
+            }
+            parent_id = topic_id
+            print(f"Topic shift → new branch: {tree['nodes'][topic_id]['content']}")
 
     node_id = f"node_{int(datetime.now().timestamp() * 1000)}"
     tree["nodes"][node_id] = {
         "id":       node_id,
-        "content":  label,
+        "content":  meta["label"],
+        "summary":  meta["summary"],
+        "tags":     meta["tags"],
         "parentId": parent_id,
         "messages": [
             {"role": "user",      "text": user_text},
@@ -277,7 +312,7 @@ def main():
 
     state[session_id] = mtime
     save_state(state)
-    print(f"Added: {label}")
+    print(f"Added: {meta['label']} | {meta['summary']}")
 
 
 if __name__ == "__main__":
